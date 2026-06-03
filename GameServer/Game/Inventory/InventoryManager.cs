@@ -4,6 +4,7 @@ using MikuSB.Database;
 using MikuSB.Database.Inventory;
 using MikuSB.Enums.Item;
 using MikuSB.GameServer.Game.Player;
+using MikuSB.GameServer.Game.Support;
 using MikuSB.GameServer.Server.Packet.Send.Misc;
 
 namespace MikuSB.GameServer.Game.Inventory;
@@ -135,7 +136,17 @@ public class InventoryManager(PlayerInstance player) : BasePlayerManager(player)
             ItemType = genre,
             ItemCount = 1,
             Level = cardLevel,
+            AffixId = 0,
         };
+
+        var affixCount = cardLevel >= spCard.MaxLevel ? spCard.TotalAffixCount : spCard.InitialAffixCount;
+        for (int i = 0; i < affixCount && i < spCard.AffixPool.Count; i++)
+        {
+            var (affixId, tier) = SupportAffixService.GenerateRandomAffix(spCard.AffixPool[i]);
+            if (affixId == 0) continue;
+            SupportAffixStateService.SetAffix(info, i + 1, affixId, tier);
+        }
+
         InventoryData.SupportCards[info.UniqueId] = info;
 
         if (sendPacket) await Player.SendPacket(new PacketNtfCallScript([info]));
@@ -195,6 +206,27 @@ public class InventoryManager(PlayerInstance player) : BasePlayerManager(player)
     {
         var templateId = GameResourceTemplateId.FromGdpl((uint)genre, detail, particular, level);
         return InventoryData.Items.Values.FirstOrDefault(x => x.TemplateId == templateId);
+    }
+
+    public async ValueTask<BaseGameItemInfo?> AddMonsterCardItem(uint detail, uint particular, uint level = 1, bool sendPacket = true)
+    {
+        const ItemTypeEnum genre = ItemTypeEnum.TYPE_MONSTER_CARD;
+        var templateId = GameResourceTemplateId.FromGdpl((uint)genre, detail, particular, level);
+        if (!GameData.MonsterCardData.ContainsKey(templateId))
+            return null;
+
+        var monsterInfo = new BaseGameItemInfo
+        {
+            TemplateId = templateId,
+            UniqueId = InventoryData.NextUniqueUid++,
+            ItemType = genre,
+            ItemCount = 1
+        };
+        InventoryData.Items[monsterInfo.UniqueId] = monsterInfo;
+
+        if (sendPacket) await Player.SendPacket(new PacketNtfCallScript([monsterInfo]));
+
+        return monsterInfo;
     }
 
     private static uint GetSuppliesMaxCount(SuppliesExcel suppliesData) =>
@@ -332,5 +364,26 @@ public class InventoryManager(PlayerInstance player) : BasePlayerManager(player)
         if (sendPacket) await Player.SendPacket(new PacketNtfCallScript([weaponPartInfo]));
 
         return weaponPartInfo;
+    }
+
+    public async ValueTask<BaseGameItemInfo?> AddHouseFurnitureItem(ItemTypeEnum genre, uint detail, uint particular, uint level = 1, bool sendPacket = true)
+    {
+        if (genre != ItemTypeEnum.TYPE_HOUSE) return null;
+        var houseFurnitureData = GameData.DormGiftData.Values.FirstOrDefault(x => x.Genre == (int)genre && x.Detail == detail && x.Particular == particular && x.Level == level);
+        if (houseFurnitureData == null) return null;
+        var templateId = GameResourceTemplateId.FromGdpl((uint)genre, detail, particular, level);
+        if (InventoryData.Items.Values.Any(x => x.TemplateId == templateId)) return null;
+        var furnitureInfo = new BaseGameItemInfo
+        {
+            TemplateId = templateId,
+            UniqueId = InventoryData.NextUniqueUid++,
+            ItemType = genre,
+            ItemCount = 1
+        };
+        InventoryData.Items[furnitureInfo.UniqueId] = furnitureInfo;
+
+        if (sendPacket) await Player.SendPacket(new PacketNtfCallScript([furnitureInfo]));
+
+        return furnitureInfo;
     }
 }

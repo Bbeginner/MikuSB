@@ -7,6 +7,12 @@
 
 日本語のドキュメントは [README_jp.md](README_jp.md) にあります。
 
+## Scam Warning
+
+MikuSB is completely free and open source.
+If anyone sold you this server or charged money to provide it, that was a scam.
+Request a refund immediately and report the seller to us on Discord with any relevant proof or purchase details.
+
 ## Overview
 
 - `SdkServer`
@@ -37,12 +43,13 @@
 ## Running
 
 1. Restore dependencies and build.
-
 ```powershell
 dotnet build
 ```
-
-2. Enjoy.
+2. Set `GamePath` in `Config.json` to the path of your game executable.
+3. Start the server and run the `game` command.
+4. Create an account in the server console.  
+5. Enjoy.
 
 ## Feature List
 

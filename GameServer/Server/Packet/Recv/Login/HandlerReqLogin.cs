@@ -11,6 +11,8 @@ using MikuSB.GameServer.Server.Packet.Send.Misc;
 using MikuSB.Proto;
 using MikuSB.TcpSharp;
 using MikuSB.Util;
+using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace MikuSB.GameServer.Server.Packet.Recv.Login;
@@ -18,19 +20,46 @@ namespace MikuSB.GameServer.Server.Packet.Recv.Login;
 [Opcode(CmdIds.ReqLogin)]
 public class HandlerReqLogin : Handler
 {
+    private static readonly Logger Logger = new("ReqLogin");
+    private const int SupportCardLoginSplitThreshold = 2000;
+
+    private static string? ExtractSdkAuthToken(string? token)
+    {
+        if (string.IsNullOrWhiteSpace(token))
+            return null;
+
+        try
+        {
+            var normalized = Uri.UnescapeDataString(token).Trim();
+            var padding = normalized.Length % 4;
+            if (padding > 0)
+                normalized = normalized.PadRight(normalized.Length + (4 - padding), '=');
+
+            var json = Encoding.UTF8.GetString(Convert.FromBase64String(normalized));
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.TryGetProperty("authToken", out var authToken)
+                ? authToken.GetString()
+                : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     public override async Task OnHandle(Connection connection, byte[] data, ushort seqNo)
     {
         var req = ReqLogin.Parser.ParseFrom(data);
-        var account = AccountData.GetAccountByUid(1);
+        var sdkAuthToken = ExtractSdkAuthToken(req.Token);
+        var account = AccountData.GetAccountByComboToken(req.Token)
+                      ?? AccountData.GetAccountByDispatchToken(req.Token)
+                      ?? AccountData.GetAccountByComboToken(sdkAuthToken ?? "")
+                      ?? AccountData.GetAccountByDispatchToken(sdkAuthToken ?? "");
         if (account == null)
         {
-            AccountData.CreateAccount("MIKU", 0, "");
-            account = AccountData.GetAccountByUid(1);
-            if (account == null)
-            {
-                await connection.SendPacket(CmdIds.NtfLogout);
-                return;
-            }
+            Logger.Warn($"Rejected login: provider={req.Provider}, token={req.Token}, authToken={sdkAuthToken}");
+            await connection.SendPacket(CmdIds.NtfLogout);
+            return;
         }
         if (!ResourceManager.IsLoaded)
             // resource manager not loaded, return
@@ -52,14 +81,33 @@ public class HandlerReqLogin : Handler
             $"Debug-{DateTime.Now:yyyy-MM-dd HH-mm-ss}.log");
         await connection.Player.OnEnterGame();
         connection.Player.Connection = connection;
-        await connection.SendPacket(new PacketRspLogin(connection.Player!));
+        var splitSupportCards = connection.Player.InventoryManager.InventoryData.SupportCards.Count > SupportCardLoginSplitThreshold;
+        await connection.SendPacket(new PacketRspLogin(connection.Player!, !splitSupportCards));
+        if (splitSupportCards)
+            await SendSupportCardsOnLogin(connection);
+        await connection.SendPacket(new PacketNtfCallScript(connection.Player!));
         await SendDebugLoginState(connection);
 
         await connection.Player.OnHeartBeat();
         await connection.SendPacket(new PacketNtfUpdateFriend(connection.Player!));
         ApplySavedGirlSkinTypes(connection.Player!);
-        await connection.SendPacket(new PacketNtfCallScript(connection.Player!.InventoryManager.InventoryData));
         await SendGirlSkinTypeOnLogin(connection);
+    }
+
+    private static async Task SendSupportCardsOnLogin(Connection connection)
+    {
+        var player = connection.Player;
+        if (player == null)
+            return;
+
+        var supportCards = player.InventoryManager.InventoryData.SupportCards.Values.ToList();
+        Logger.Info($"Split support card sync on login: total={supportCards.Count}, chunkSize={SupportCardLoginSplitThreshold}");
+
+        foreach (var chunk in supportCards.Chunk(SupportCardLoginSplitThreshold))
+        {
+            var packet = new PacketNtfCallScript(chunk.ToList());
+            await connection.SendPacket(packet);
+        }
     }
 
     private static void ApplySavedGirlSkinTypes(PlayerInstance player)

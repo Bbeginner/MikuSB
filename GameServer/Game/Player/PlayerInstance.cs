@@ -196,7 +196,7 @@ public class PlayerInstance(PlayerGameData data)
         return proto;
     }
 
-    public Proto.Player ToPlayerProto()
+    public Proto.Player ToPlayerProto(bool includeSupportCards = true)
     {
         BuildPlayerAttr();
         var displayName = PlayerGameData.NormalizeDisplayName(Data.Name);
@@ -205,6 +205,8 @@ public class PlayerInstance(PlayerGameData data)
             Pid = (ulong)Data.Uid,
             Account = displayName,
             Provider = displayName,
+            Channel = "gm",
+            Subchannel = "gm",
             Name = displayName,
             Level = Data.Level,
             Sex = Data.Gender,
@@ -214,6 +216,13 @@ public class PlayerInstance(PlayerGameData data)
         };
 
         foreach (var chara in CharacterManager.CharacterData.Characters) proto.Items.Add(chara.ToProto());
+        foreach (var item in InventoryManager.InventoryData.Items.Values) proto.Items.Add(item.ToProto());
+        foreach (var skin in InventoryManager.InventoryData.Skins.Values) proto.Items.Add(skin.ToProto());
+        foreach (var weapon in InventoryManager.InventoryData.Weapons.Values) proto.Items.Add(weapon.ToProto());
+        if (includeSupportCards)
+        {
+            foreach (var card in InventoryManager.InventoryData.SupportCards.Values) proto.Items.Add(card.ToProto());
+        }
         foreach (var x in Data.Attrs)
         {
             uint gid = x.Gid;
@@ -226,13 +235,18 @@ public class PlayerInstance(PlayerGameData data)
                 continue;
             }
 
-            proto.Attrs[ToPackedAttrKey(gid, sid)] = val;
+            proto.Attrs[ToPackedAttrKey(gid, sid)] = val;   
             proto.Attrs[ToShiftedAttrKey(gid, sid)] = val;
         }
 
         foreach (var x in Data.StrAttrs)
         {
             proto.StrAttrs[ToShiftedAttrKey(x.Gid, x.Sid)] = x.Val;
+        }
+
+        foreach (var (key, value) in BuildMoneySync())
+        {
+            proto.Money[key] = value;
         }
 
         proto.ShowItems.AddRange(Data.ShowItems);
@@ -288,9 +302,28 @@ public class PlayerInstance(PlayerGameData data)
         return (gid << 16) | sid;
     }
 
-    public void BuildPlayerAttr()
+    public Dictionary<string, int> BuildMoneySync()
     {
-        var bootstrapAttrs = BuildLobbyBootstrapAttrs();
+        var currentMoney = (int)Math.Min(int.MaxValue, GetAttrValue(1, 3));
+        var sync = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["."] = currentMoney,
+            ["gm.gm"] = currentMoney,
+            ["jinshan.jinshan"] = currentMoney,
+            ["pc_jinshan.pc_jinshan"] = currentMoney
+        };
+        return sync;
+    }
+
+    private uint GetAttrValue(uint gid, uint sid)
+    {
+        return Data.Attrs.FirstOrDefault(x => x.Gid == gid && x.Sid == sid)?.Val ?? 0;
+    }
+
+    public void BuildPlayerAttr(bool additional = false)
+    {
+        var bootstrapAttrs = BuildLobbyBootstrapAttrs().ToList();
+        if (additional) bootstrapAttrs.AddRange(BuildGirlFurnitureAttrs());
         var existingAttrs = Data.Attrs
             .ToDictionary(x => (x.Gid, x.Sid));
         var seenAttrs = new HashSet<(uint Gid, uint Sid)>();
@@ -318,6 +351,53 @@ public class PlayerInstance(PlayerGameData data)
             Data.Attrs.Add(newAttr);
             existingAttrs[(gid, sid)] = newAttr;
         }
+    }
+
+    private static IEnumerable<(uint Gid, uint Sid, uint Value)> BuildGirlFurnitureAttrs()
+    {
+        const uint furnitureUnlockedValue = 153391689;
+        var groupFurnitureByArea = new Dictionary<uint, uint>();
+        foreach (var pos in GameData.HouseFurniturePosData.Values)
+        {
+            var areaId = pos.AreaId;
+            var groupId = pos.GroupId;
+            uint selectedIndex = 1;
+            var shift = (groupId - 1) * 3;
+            if (!groupFurnitureByArea.TryGetValue(areaId, out var packed)) packed = 0;
+            packed |= (selectedIndex << (int)shift);
+            groupFurnitureByArea[areaId] = packed;
+        }
+
+        for (uint girlId = 0; girlId <= 50; girlId++)
+        {
+            var baseSid = girlId * 50;
+            for (uint offset = 10; offset <= 19; offset++)
+                yield return (101, baseSid + offset, furnitureUnlockedValue);
+
+            if (groupFurnitureByArea.TryGetValue(girlId, out var groupValue))
+                yield return (101, baseSid + 20, groupValue);
+        }
+
+        // Massage room furniture
+        // 10010..10019
+        for (uint sid = 10010; sid <= 10019; sid++)
+            yield return (101, sid, furnitureUnlockedValue);
+
+        // Massage room group state
+        yield return (101, 10020, 1);
+
+        // Hot spring furniture
+        // 15001..15010
+        for (uint sid = 15001; sid <= 15010; sid++)
+            yield return (101, sid, furnitureUnlockedValue);
+
+        // Beach furniture
+        // 17101..17110
+        for (uint sid = 17101; sid <= 17110; sid++)
+            yield return (101, sid, furnitureUnlockedValue);
+
+        for (uint sid = 30000; sid < 31000; sid++)
+            yield return (101, sid, furnitureUnlockedValue);
     }
 
     private static IEnumerable<(uint Gid, uint Sid, uint Value)> BuildLobbyBootstrapAttrs()
@@ -369,6 +449,22 @@ public class PlayerInstance(PlayerGameData data)
             yield return (21, levelId, 7);
             yield return (22, levelId, 1_700_000_000);
         }
+
+        // Role fragment chapters use Condition.PRE_LEVEL against Launch.GPASSID as well.
+        // Mark every role level as cleared so character-specific stages beyond the first one unlock.
+        foreach (var levelId in GameData.RoleLevelData.Keys)
+        {
+            yield return (21, levelId, 7);
+            yield return (22, levelId, 1_700_000_000);
+        }
+
+        foreach (var guide in GameData.GuideData.Values)
+        {
+            yield return (4, guide.ID, 999);
+        }
+
+        for (uint favor = 0; favor <= 50; favor++)
+            yield return (101, favor * 50, 500);
 
         // Main Scene 0 mean default scene
         yield return (132, 1, 0);
