@@ -1,0 +1,35 @@
+name: Upstream Sync
+
+# 权限设置，让脚本有权限把更新推送到你的仓库
+permissions:
+  contents: write
+
+on:
+  # 定时触发：这里设置的是每天 UTC 时间 0 点执行，即北京时间早上 8 点
+  schedule:
+    - cron:  '0 0 * * *'
+  # 允许手动触发：方便你随时检查更新
+  workflow_dispatch:
+
+jobs:
+  sync_with_upstream:
+    name: Sync with Upstream
+    runs-on: ubuntu-latest
+    # 确保只在 fork 的仓库中执行，避免误操作
+    if: ${{ github.event.repository.fork }}
+
+    steps:
+      - name: Checkout target repo
+        uses: actions/checkout@v3
+
+      # 核心同步步骤
+      - name: Sync Upstream
+        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
+        with:
+          # 同步所需的 token，这是固定写法
+          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
+          # 👇 这里修改成原仓库的地址
+          upstream_sync_repo: MikuLeaks/MikuSB
+          upstream_sync_branch: main
+          target_sync_branch: main
+          test_mode: false
