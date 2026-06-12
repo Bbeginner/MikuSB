@@ -1,34 +1,68 @@
-name: Auto Release After Sync
+name: Build and Release
 
+# 为了让上游同步后能触发这个工作流，我们让它监听 main 分支的 push 事件
 on:
   push:
     branches:
-      - main   # 当 main 分支被更新时触发（正好是 Upstream Sync 推送后）
+      - main
 
+# 授予创建 Release 和上传文件的权限
 permissions:
   contents: write
 
 jobs:
-  create-release:
-    runs-on: ubuntu-latest
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            runtime: win-x64
+            output_name: MikuSB-win-x64
+          - os: ubuntu-latest
+            runtime: linux-x64
+            output_name: MikuSB-linux-x64
+      # 确保即使某个平台构建失败，也不影响其他平台
+      fail-fast: false
+
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0   # 需要完整历史来获取 tag 信息
 
-      - name: Generate next version
-        id: version
+      # --- 针对 Windows 和 Linux 的特殊设置 ---
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'  # 👈 请根据你的项目.NET版本修改
+
+      # 如果 .NET 项目需要安装其他依赖（比如 NuGet），可以取消下面步骤的注释
+      # - name: Restore dependencies
+      #   run: dotnet restore
+
+      # --- 核心构建步骤：使用 dotnet publish 生成独立可执行文件 ---
+      - name: Publish for ${{ matrix.runtime }}
+        # 将 MyApp.csproj 替换为你项目的主项目文件
         run: |
-          # 获取最新的 tag（如 v1.0.0），然后递增补丁号，或使用时间戳
-          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-          # 简单的补丁号 +1，你也可以改成日期格式：date +'v%Y%m%d'
-          NEW_TAG=$(echo $LATEST_TAG | awk -F. '{print $1"."$2"."$3+1}')
-          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
+          dotnet publish MyApp.csproj `
+            --configuration Release `
+            --runtime ${{ matrix.runtime }} `
+            --self-contained true `
+            --output ./publish/${{ matrix.runtime }}
+        shell: bash
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      # --- 打包和校验步骤：生成最终的 .zip 和 .sha256 文件 ---
+      - name: Package and checksum
+        run: |
+          mkdir -p release_assets
+          # 打包 publish 目录下的所有内容
+          pushd ./publish/${{ matrix.runtime }}
+          zip -r ../../release_assets/${{ matrix.output_name }}.zip .
+          popd
+          # 计算 zip 文件的 SHA256 校验和
+          sha256sum release_assets/${{ matrix.output_name }}.zip > release_assets/${{ matrix.output_name }}.zip.sha256
+      - name: Upload artifacts to workflow
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ steps.version.outputs.new_tag }}
-          generate_release_notes: true
-          # 如果不想每次都创建，可以添加条件判断，比如检查是否有新提交
+          name: ${{ matrix.output_name }}
+          path: release_assets/
