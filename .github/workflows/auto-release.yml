@@ -1,0 +1,34 @@
+name: Auto Release After Sync
+
+on:
+  push:
+    branches:
+      - main   # 当 main 分支被更新时触发（正好是 Upstream Sync 推送后）
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 需要完整历史来获取 tag 信息
+
+      - name: Generate next version
+        id: version
+        run: |
+          # 获取最新的 tag（如 v1.0.0），然后递增补丁号，或使用时间戳
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          # 简单的补丁号 +1，你也可以改成日期格式：date +'v%Y%m%d'
+          NEW_TAG=$(echo $LATEST_TAG | awk -F. '{print $1"."$2"."$3+1}')
+          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.new_tag }}
+          generate_release_notes: true
+          # 如果不想每次都创建，可以添加条件判断，比如检查是否有新提交
