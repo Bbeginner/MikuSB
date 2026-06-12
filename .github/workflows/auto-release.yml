@@ -1,12 +1,10 @@
 name: Build and Release
 
-# 为了让上游同步后能触发这个工作流，我们让它监听 main 分支的 push 事件
 on:
   push:
     branches:
       - main
 
-# 授予创建 Release 和上传文件的权限
 permissions:
   contents: write
 
@@ -23,46 +21,100 @@ jobs:
           - os: ubuntu-latest
             runtime: linux-x64
             output_name: MikuSB-linux-x64
-      # 确保即使某个平台构建失败，也不影响其他平台
       fail-fast: false
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # --- 针对 Windows 和 Linux 的特殊设置 ---
       - name: Setup .NET SDK
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '6.0.x'  # 👈 请根据你的项目.NET版本修改
+          dotnet-version: '6.0.x'   # 改成你的 .NET 版本
 
-      # 如果 .NET 项目需要安装其他依赖（比如 NuGet），可以取消下面步骤的注释
-      # - name: Restore dependencies
-      #   run: dotnet restore
-
-      # --- 核心构建步骤：使用 dotnet publish 生成独立可执行文件 ---
-      - name: Publish for ${{ matrix.runtime }}
-        # 将 MyApp.csproj 替换为你项目的主项目文件
+      # 🔍 自动查找项目文件或解决方案文件
+      - name: Find project file
+        id: findproj
         run: |
-          dotnet publish MyApp.csproj `
-            --configuration Release `
-            --runtime ${{ matrix.runtime }} `
-            --self-contained true `
-            --output ./publish/${{ matrix.runtime }}
+          # 优先查找 .csproj，如果没有就查找 .sln
+          PROJ_FILE=$(ls *.csproj 2>/dev/null | head -n1)
+          if [ -z "$PROJ_FILE" ]; then
+            PROJ_FILE=$(ls *.sln 2>/dev/null | head -n1)
+          fi
+          if [ -z "$PROJ_FILE" ]; then
+            echo "No .csproj or .sln file found!"
+            exit 1
+          fi
+          echo "PROJECT_FILE=$PROJ_FILE" >> $GITHUB_OUTPUT
         shell: bash
 
-      # --- 打包和校验步骤：生成最终的 .zip 和 .sha256 文件 ---
+      # 📦 执行 dotnet publish（正确语法）
+      - name: Publish for ${{ matrix.runtime }}
+        run: |
+          dotnet publish "${{ steps.findproj.outputs.PROJECT_FILE }}" \
+            --configuration Release \
+            --runtime ${{ matrix.runtime }} \
+            --self-contained true \
+            --output "./publish/${{ matrix.runtime }}"
+        shell: bash
+
+      # 📦 打包和校验
       - name: Package and checksum
         run: |
           mkdir -p release_assets
-          # 打包 publish 目录下的所有内容
-          pushd ./publish/${{ matrix.runtime }}
-          zip -r ../../release_assets/${{ matrix.output_name }}.zip .
+          pushd "./publish/${{ matrix.runtime }}"
+          zip -r "../../release_assets/${{ matrix.output_name }}.zip" .
           popd
-          # 计算 zip 文件的 SHA256 校验和
-          sha256sum release_assets/${{ matrix.output_name }}.zip > release_assets/${{ matrix.output_name }}.zip.sha256
-      - name: Upload artifacts to workflow
+          sha256sum "release_assets/${{ matrix.output_name }}.zip" > "release_assets/${{ matrix.output_name }}.zip.sha256"
+        shell: bash
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.output_name }}
           path: release_assets/
+
+  # 这里接着上一个 create-release 部分（和之前一样，保持不变）
+  create-release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate next version (timestamp based)
+        id: version
+        run: |
+          DATE=$(date +'%Y.%m.%d')
+          COUNT=$(git tag -l "v${DATE}-*" | wc -l)
+          NEXT_COUNT=$((COUNT + 1))
+          PADDED_COUNT=$(printf "%03d" $NEXT_COUNT)
+          NEW_TAG="v${DATE}-${PADDED_COUNT}"
+          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
+
+      - name: Create and push tag
+        run: |
+          git tag ${{ steps.version.outputs.new_tag }}
+          git push origin ${{ steps.version.outputs.new_tag }}
+
+      - name: Download all built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.new_tag }}
+          name: "Auto Release ${{ steps.version.outputs.new_tag }}"
+          body: |
+            自动构建的 Release，基于上游最新代码。
+            - 触发 commit: ${{ github.sha }}
+          generate_release_notes: true
+          files: |
+            artifacts/*/*.zip
+            artifacts/*/*.sha256
